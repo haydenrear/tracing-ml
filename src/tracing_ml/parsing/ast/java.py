@@ -1,7 +1,7 @@
 import os.path
 
 from antlr4 import *
-from antlr4.tree.Tree import ParseTreeWalker
+from antlr4.tree.Tree import ParseTreeWalker, TerminalNodeImpl
 
 from tracing_ml.parsing.ast.antlr.java_lexer import JavaLexer
 from tracing_ml.parsing.ast.antlr.java_parser import JavaParser
@@ -44,14 +44,22 @@ def load_ast(code):
             super().__init__()
             self.ast_tokens = []
 
-        def visitTerminal(self, node):
+
+        def visitTerminal(self, node: TerminalNodeImpl):
             self.ast_tokens.append(ASTToken(tokens_dict[node.symbol.type], node.getText(), node.symbol.line, node.symbol.column))
 
         def visitErrorNode(self, node):
             print(f"Error parsing code: {node.getText()}")
 
         def enterEveryRule(self, ctx: ParserRuleContext):
-            pass
+            if isinstance(ctx, JavaParser.PackageDeclarationContext):
+                pass
+            if isinstance(ctx, JavaParser.TypeDeclarationContext):
+                pass
+            if isinstance(ctx, JavaParser.ClassOrInterfaceModifierContext):
+                pass
+            if isinstance(ctx, JavaParser.ClassOrInterfaceTypeContext):
+                pass
 
         def exitEveryRule(self, ctx: ParserRuleContext):
             pass

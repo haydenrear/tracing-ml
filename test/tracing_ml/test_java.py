@@ -7,7 +7,8 @@ class TestParseJava(unittest.TestCase):
     def test_something(self):
         for t in load_ast("""
         package com.hayden.ok;
-        
+       
+        @Whatever 
         class Okay {
             private String okay; 
             

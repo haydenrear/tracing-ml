@@ -4,3 +4,10 @@ test_work/
 *.pyc
 .git.bfg-report/*
 
+out/
+tracing_ml_venv/
+/tracing_ml_venv/**
+tracing_ml_venv/**
+
+tracing_ml_venv
+test/tracing_ml/.venv
