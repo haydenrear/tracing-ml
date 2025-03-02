@@ -360,7 +360,7 @@ def training_loop_adversarial(model, reconstruction_network, optimizer_model, op
 import torch.nn as nn
 
 # Assuming you have your theta series layer and reconstruction network
-def pretraining_loop(model, reconstruction_network, optimizer_model, optimizer_recon, input_data):
+def laplaces_demon(model, reconstruction_network, optimizer_model, optimizer_recon, input_data):
     optimizer_model.zero_grad()
     optimizer_recon.zero_grad()
 
