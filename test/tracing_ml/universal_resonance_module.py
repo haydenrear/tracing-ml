@@ -153,7 +153,7 @@ def training_loop(model, optimizer, tau, z):
     total_loss.backward()
     optimizer.step()
 
-class ContrastiveTrainer(Trainer):
+class LaplacesDemon(Trainer):
     def compute_loss(self, model, inputs, num_items_in_batch):
         # Assume your inputs include "input_ids" and "labels"
         # Temperature values
@@ -195,7 +195,7 @@ training_args = TrainingArguments(
 )
 
 # Assuming you have defined your dataset (e.g., GradientDataset) and your model is instantiated as `your_model`
-trainer = ContrastiveTrainer(
+trainer = LaplacesDemon(
     model=model,
     train_dataset=dataset["train"],
     data_collator=collate_fn,
