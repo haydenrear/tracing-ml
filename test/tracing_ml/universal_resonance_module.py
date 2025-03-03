@@ -179,6 +179,7 @@ class LaplacesDemon(Trainer):
         model.generation_config.temperature = 1
         model.model.temperature = 1
 
+        # should the original loss be included at all?
         return torch.nn.functional.relu(loss_higher_temp - loss_lower_temp)
 
 
