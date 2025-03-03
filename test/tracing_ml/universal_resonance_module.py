@@ -266,7 +266,7 @@ class ThetaSeriesHead(nn.Module):
     def __init__(self, num_terms, hidden_state_dim=8192):
         super(ThetaSeriesHead, self).__init__()
         self.theta_layer = ThetaSeriesLayer(num_terms)
-        self.fc = nn.Linear(hidden_state_dim, num_classes_llama) # Example output layer
+        self.fc = nn.Linear(hidden_state_dim, num_classes_llama)
         self.out_softmax = torch.nn.Softmax()
 
     def forward(self, x):
