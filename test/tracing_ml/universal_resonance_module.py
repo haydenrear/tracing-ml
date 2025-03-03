@@ -262,6 +262,9 @@ class ThetaSeriesLayer(nn.Module):
             result += self.coefficients[n] * torch.exp(-n*x * self.tau)
         return result
 
+# Imagine a world where training adapter gets bigger and bigger but the weights stay the same size.
+# The training adapter branches further and further including more and more concepts to be indexed
+# into the weights.
 class ThetaSeriesHead(nn.Module):
     def __init__(self, num_terms, hidden_state_dim=8192):
         super(ThetaSeriesHead, self).__init__()
