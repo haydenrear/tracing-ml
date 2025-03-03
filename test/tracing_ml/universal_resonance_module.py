@@ -100,12 +100,13 @@ class ThetaSeriesLayer(nn.Module):
         super(ThetaSeriesLayer, self).__init__()
         self.num_terms = num_terms
         self.coefficients = nn.Parameter(torch.randn(num_terms)) #learnable coefficients
+        self.tau = nn.Parameter(torch.randn(1))
 
     def forward(self, x):
         #Simplified theta series example, needs to be adjusted.
         result = torch.zeros_like(x)
         for n in range(self.num_terms):
-            result += self.coefficients[n] * torch.exp(-n*x) #example exponential
+            result += self.coefficients[n] * torch.exp(-n*x * self.tau)
         return result
 
 class MyNetwork(nn.Module):
@@ -118,9 +119,6 @@ class MyNetwork(nn.Module):
         theta_output = self.theta_layer(x)
         output = self.fc(theta_output)
         return output
-
-import torch
-import torch.nn as nn
 
 def modular_transform(tau, z):
     """Applies a simple modular transformation (example)."""
@@ -177,12 +175,52 @@ class LaplacesDemon(Trainer):
         loss_lower_temp = outputs.loss
         loss_higher_temp = higher_temp_outputs.loss
 
-        if loss_lower_temp < loss_higher_temp:
-            contrastive_loss = 0
-        else:
-            contrastive_loss = outputs.loss + (loss_higher_temp - loss_lower_temp)
+        model.config.temperature = 1
+        model.generation_config.temperature = 1
+        model.model.temperature = 1
 
-        return contrastive_loss
+        return torch.nn.functional.relu(loss_higher_temp - loss_lower_temp)
+
+
+import torch
+
+def is_converged(theta_output, running_average, threshold):
+    """Checks if the theta series has converged."""
+    difference = torch.abs(theta_output - running_average)
+    return difference < threshold
+
+def update_running_average(theta_output, running_average, alpha):
+    """Updates the running average."""
+    return alpha * theta_output + (1 - alpha) * running_average
+
+# In your training loop:
+running_average = torch.zeros_like(model.theta_layer(input_data)) #initialize average.
+threshold = 0.01
+alpha = 0.1 #smoothing factor.
+
+theta_output = model.theta_layer(input_data)
+running_average = update_running_average(theta_output, running_average, alpha)
+
+if not is_converged(theta_output, running_average, threshold):
+    add_theta_term(model.theta_layer) #add a term if not converged.
+    optimizer.param_groups[0]['lr'] *= 1.5  # Increase learning rate
+
+def should_branch(entropy_map, threshold):
+    """Checks if branching is needed."""
+    branching_score = calculate_branching_score(entropy_map)
+    return branching_score > threshold
+
+def add_theta_term(theta_series_layer):
+    """Adds a new term to the theta series."""
+    # Implement your term addition logic here
+    new_coefficient = nn.Parameter(torch.randn(1))
+    theta_series_layer.coefficients = nn.Parameter(torch.cat((theta_series_layer.coefficients, new_coefficient)))
+
+# In your training loop:
+if should_branch(entropy_map, threshold):
+    add_theta_term(model.theta_layer)
+    optimizer.param_groups[0]['lr'] *= 1.5  # Increase learning rate
+    # Log the branching event
 
 # Set up training arguments
 training_args = TrainingArguments(
