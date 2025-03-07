@@ -278,7 +278,7 @@ class ThetaSeriesHead(nn.Module):
         return self.out_softmax(output)
 
 # Pretrain the theta series on reconstruction loss
-class ThetaSeriesPretrainer(nn.Module):
+class ThetaSeriesPreTrainer(nn.Module):
     def __init__(self, model, theta_series: ThetaSeriesHead):
         self.model = model
         self.theta_series_head = theta_series
