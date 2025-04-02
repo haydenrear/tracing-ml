@@ -221,14 +221,17 @@ def do_train():
         return tokenized_batch
 
     # Step 4: Create DataLoader with the custom collate_fn
-    train_dataloader = DataLoader(dataset["train"], batch_size=1, collate_fn=collate_fn)
+    train_dataloader = DataLoader(dataset["train"], batch_size=1, collate_fn=collate_fn, shuffle=True)
     next(iter(train_dataloader))
 
     #############################
     # 3. Load and Modify LLaMA Model
     #############################
 
-    model = LlamaForCausalLM.from_pretrained(model_name, device_map="auto", token=TOKEN, use_cache=False)
+    model = LlamaForCausalLM.from_pretrained(device_map="auto", token=TOKEN, use_cache=False,
+                                             pretrained_model_name_or_path='/Users/hayde/IdeaProjects/drools/tracing_ml/test/tracing_ml/work/checkpoint-500')
+
+    loaded = torch.load('/Users/hayde/IdeaProjects/drools/tracing_ml/test/tracing_ml/work/checkpoint-500/pytorch_model.bin')
 
     # Replace GELU with KANActivation and MultiheadAttention with KANAttention.
     # Note: This loop depends on model implementation details.
@@ -241,7 +244,8 @@ def do_train():
         if hasattr(layer, "mlp") and hasattr(layer.mlp, "gate_proj"):
             print("Replacing KAN Activation for MLP layer")
         if hasattr(layer, "self_attn"):
-            next_q_param = torch.nn.Parameter(torch.tensor([1.0]), requires_grad=True)
+            # next_q_param = torch.nn.Parameter(torch.tensor([1.0]), requires_grad=True)
+            next_q_param = loaded[f'model.layers.{i}.self_attn.softmax.q']
             q_params.append(next_q_param)
             layer.self_attn = PatchedLlamaAttention(layer.self_attn, next_q_param)
 
@@ -249,6 +253,8 @@ def do_train():
 
     model.model.layers = torch.nn.ModuleList([o for o in out_layers])
     out_layers.clear()
+
+    loaded.clear()
 
     with open('out_file.txt', 'w') as o:
         pass
@@ -292,6 +298,7 @@ def do_train():
     out_dir = 'work'
 
     training_args = TrainingArguments(
+        resume_from_checkpoint='/Users/hayde/IdeaProjects/drools/tracing_ml/test/tracing_ml/work/checkpoint-500',
         save_safetensors=False,
         learning_rate=5e-5,
         save_strategy=save_strategy,
