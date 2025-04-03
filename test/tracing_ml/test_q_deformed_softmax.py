@@ -1,28 +1,19 @@
-# !pip3 install torch torchaudio torchvision torchtext torchdata
-# !pip3 install datasets
 import gc
 import math
-import os
 import sys
 import typing
-from typing import Optional, Union, Dict, Callable, List, Tuple, Type, Any
-
-import torch.nn.functional as F
+from typing import Optional, Union
 
 import entmax
-from torch.utils.data import DataLoader, Dataset, IterableDataset, Subset
-
 import torch
 import torch.nn as nn
-from transformers import LlamaForCausalLM, LlamaTokenizer, Trainer, TrainingArguments, AutoTokenizer, TrainerCallback, \
-    LlamaConfig, Cache, PreTrainedModel, DataCollator, PreTrainedTokenizerBase, BaseImageProcessor, \
-    FeatureExtractionMixin, ProcessorMixin, EvalPrediction, TrainerState, TrainerControl
 from datasets import load_dataset
-from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
-from transformers.models.llama.modeling_llama import apply_rotary_pos_emb, eager_attention_forward
+from torch.utils.data import DataLoader, Dataset, Subset
+from transformers import LlamaForCausalLM, Trainer, TrainingArguments, AutoTokenizer, TrainerCallback, \
+    Cache, TrainerState, TrainerControl
+from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
 
 DEVICE = 'mps'
-
 
 TOKEN="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"
 
@@ -37,35 +28,6 @@ def reset_q_params(q_params, lower_clamp=1.0):
         #     q.data[0] = 1.0
         # if q_item > 1.9999 or q_item < lower_clamp:
         #     q.data.clamp_(lower_clamp, 1.9999)  # TODO: seems like early it might want low, then push up ? also delegating optimizer, copy adam and then set q lr separate
-
-def q_exponential(x, q): # TODO: try sigmoid input?
-    o = torch.exp(x)
-    exp = (2 - q) * o
-    return exp
-
-
-
-
-def q_softmax(x, q):
-    """ Compute q-softmax using q-exponential normalization """
-    exp = q_exponential(x, q)
-    return exp / exp.sum(dim=-1, keepdim=True)
-
-def do_perform_clamp(next_head, max_val=1e6):
-    if torch.all(torch.isinf(next_head)):
-        raise Exception("All values were infinite!")
-    if torch.all(torch.isnan(next_head)):
-        raise Exception("All values were nan!")
-    torch_any = torch.any(torch.isinf(next_head))
-    t = torch.any(torch.isnan(next_head))
-    if torch_any or t:
-        next_head = torch.clamp(next_head, min=-1e6, max=max_val)
-        next_head = torch.where(torch.isnan(next_head),  1e-6, next_head)
-        next_head = torch.where(next_head == float('inf'),  max_val, next_head)
-        next_head = torch.where(next_head == float('-inf'),  1e-6, next_head)
-        return next_head
-    else:
-        return next_head
 
 class EntMaxBisectDelegator(torch.nn.Module):
     def __init__(self, q: torch.nn.Parameter):
@@ -84,22 +46,6 @@ class EntMaxBisectDelegator(torch.nn.Module):
         r = self.e(in_value)
 
         return r
-
-def entmax_loss(x, q):
-    if torch.allclose(q, torch.tensor(1.0)):
-        return q_softmax(x, q)
-
-    return entmax.root_finding.entmax_bisect(x, q)
-
-
-def calculate_threshold(q, fallback):
-    """ Calculate the threshold value for x based on q. """
-    if q >= 1:
-        return fallback
-    t = -1 / (1 - q)
-    if t < fallback:
-        return fallback
-    return t
 
 def perform_attn(query, key, value, input_shape, attn_mask,
                  scale, softmax_fn, o_proj, training, dropout_p, is_causal=True, enable_gqa=True):
@@ -150,7 +96,6 @@ class PatchedLlamaAttention(nn.Module):
         self.softmax = EntMaxBisectDelegator(q)
         self.f = from_val
         self.f._modules.clear()
-        # self.softmax = lambda x: torch.nn.functional.softmax(x, dim=-1)
 
     def forward(
             self,
@@ -212,7 +157,6 @@ def do_train():
     # Step 3: Create the collate_fn function to lazily tokenize during training
     def test_collate_fn(batch):
         # For each example in the batch, extract the response text and tokenize
-
         question_answers = []
         for example in batch:
             question_answer = f"<question>{example['question']}</question>"
@@ -266,19 +210,12 @@ def do_train():
             self.num_val += 1
             return DataLoader(next_value, batch_size=1, collate_fn=test_collate_fn, shuffle=True, in_order=False)
 
-    #############################
-    # 3. Load and Modify LLaMA Model
-    #############################
-
     model = LlamaForCausalLM.from_pretrained(device_map="auto", token=TOKEN, use_cache=False,
                                              pretrained_model_name_or_path='work/checkpoint-500')
 
+    # load the model with the q values
     loaded = torch.load('work/checkpoint-500/pytorch_model.bin')
 
-    # Replace GELU with KANActivation and MultiheadAttention with KANAttention.
-    # Note: This loop depends on model implementation details.
-    # For this example we assume that the LLaMA model's transformer block
-    # is accessible via model.model.layers.
     out_layers = []
     q_params = []
     for i, layer in enumerate(model.model.layers):
@@ -290,7 +227,7 @@ def do_train():
             if name in loaded.keys():
                 next_q_param = loaded[name]
             else:
-                next_q_param = torch.nn.Parameter(torch.tensor([1.0]), requires_grad=True)
+                next_q_param = torch.nn.Parameter(torch.tensor([1.0]), requires_grad=True) # TODO: ??? resets q values every other - ok for now, like resetting some weights to 0 and meta-learning to rebuild
             q_params.append(next_q_param)
             layer.self_attn = PatchedLlamaAttention(layer.self_attn, next_q_param)
 
@@ -299,26 +236,18 @@ def do_train():
     model.model.layers = torch.nn.ModuleList([o for o in out_layers])
     out_layers.clear()
 
-    loaded.clear()
     loaded = None
-
-
-    with open('out_file.txt', 'w') as o:
-        pass
-    with open('loss_file.txt', 'w') as oo:
-        pass
 
     class OnEval(TrainerCallback):
 
         def on_evaluate(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
             with open('eval.txt', 'a') as f:
-                f.write(f"Eval metrics: {state.global_step}, {kwargs['metrics']}")
+                f.write(f"Eval metrics: {state.global_step}, {kwargs['metrics']}\n")
             super().on_evaluate(args, state, control, **kwargs)
 
     class MyTrainer(Trainer):
 
         eval_data_loader_provider = EvalDataLoaderProvider()
-
 
 
         def get_eval_dataloader(self, eval_dataset: Optional[Union[str, Dataset]] = None) -> DataLoader:
