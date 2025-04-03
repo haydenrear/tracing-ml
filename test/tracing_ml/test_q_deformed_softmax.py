@@ -271,9 +271,9 @@ def do_train():
     #############################
 
     model = LlamaForCausalLM.from_pretrained(device_map="auto", token=TOKEN, use_cache=False,
-                                             pretrained_model_name_or_path='/Users/hayde/IdeaProjects/drools/tracing_ml/test/tracing_ml/work/checkpoint-500')
+                                             pretrained_model_name_or_path='work/checkpoint-500')
 
-    loaded = torch.load('/Users/hayde/IdeaProjects/drools/tracing_ml/test/tracing_ml/work/checkpoint-500/pytorch_model.bin')
+    loaded = torch.load('work/checkpoint-500/pytorch_model.bin')
 
     # Replace GELU with KANActivation and MultiheadAttention with KANAttention.
     # Note: This loop depends on model implementation details.
@@ -372,9 +372,9 @@ def do_train():
     out_dir = 'work'
 
     training_args = TrainingArguments(
-        resume_from_checkpoint='/Users/hayde/IdeaProjects/drools/tracing_ml/test/tracing_ml/work/checkpoint-500',
+        resume_from_checkpoint='work/checkpoint-500',
         save_safetensors=False,
-        learning_rate=5e-5,
+        learning_rate=4e-5,
         save_strategy=save_strategy,
         logging_strategy=logging_strategy,
         save_steps=save_steps,
