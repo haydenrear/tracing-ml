@@ -3,27 +3,35 @@
 import gc
 import math
 import os
+import sys
 import typing
+from typing import Optional, Union, Dict, Callable, List, Tuple, Type, Any
+
 import torch.nn.functional as F
 
 import entmax
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset, IterableDataset, Subset
 
 import torch
 import torch.nn as nn
 from transformers import LlamaForCausalLM, LlamaTokenizer, Trainer, TrainingArguments, AutoTokenizer, TrainerCallback, \
-    LlamaConfig, Cache
+    LlamaConfig, Cache, PreTrainedModel, DataCollator, PreTrainedTokenizerBase, BaseImageProcessor, \
+    FeatureExtractionMixin, ProcessorMixin, EvalPrediction, TrainerState, TrainerControl
 from datasets import load_dataset
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.models.llama.modeling_llama import apply_rotary_pos_emb, eager_attention_forward
 
 DEVICE = 'mps'
 
+
 TOKEN="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"
 
 def reset_q_params(q_params, lower_clamp=1.0):
     for q in q_params: # TODO: don't let it go down after it goes up
         print(q)
+        with open('q.txt', 'a') as q_write:
+            q_write.write(str(float(q.data[0].item())))
+            q_write.write('\n')
         # q_item = q.data[0].item()
         # if torch.any(torch.isnan(q)):
         #     q.data[0] = 1.0
@@ -185,6 +193,7 @@ class PatchedLlamaAttention(nn.Module):
         attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights
 
+count = 0
 def do_train():
 
     #############################
@@ -192,13 +201,33 @@ def do_train():
     #############################
 
     # Load the facebook/natural_reasoning dataset from Hugging Face
-    dataset = load_dataset("facebook/natural_reasoning", token=TOKEN)
+    dataset = load_dataset("facebook/natural_reasoning", token=TOKEN).shuffle()
 
 
     # Assume the dataset has a 'text' field. Tokenize for causal LM.
     model_name = 'meta-llama/Llama-3.2-1B'
     tokenizer = AutoTokenizer.from_pretrained(model_name, token=TOKEN)
     tokenizer.pad_token = tokenizer.eos_token
+
+    # Step 3: Create the collate_fn function to lazily tokenize during training
+    def test_collate_fn(batch):
+        # For each example in the batch, extract the response text and tokenize
+
+        question_answers = []
+        for example in batch:
+            question_answer = f"<question>{example['question']}</question>"
+            question_answer += '\n'
+            question_answer += f"<response>{example['reference_answer']}</response>"
+            question_answers.append(question_answer)
+
+        tokenized_batch = tokenizer(question_answers, padding=True, truncation=True, return_tensors="pt", max_length=512)
+        print("Returning next tokenized batch.")
+        labels = tokenized_batch["input_ids"].clone()  # Clone input_ids
+        labels[:, :-1] = tokenized_batch["input_ids"][:, 1:]  # Shift labels one position to the right
+        labels[:, -1] = tokenizer.pad_token_id  # Pad the last token (important!)
+        tokenized_batch["labels"] = labels # Add labels to the tokenized batch
+        tokenized_batch["attention_mask"] = tokenized_batch["attention_mask"].to(dtype=torch.bfloat16)
+        return tokenized_batch
 
     # Step 3: Create the collate_fn function to lazily tokenize during training
     def collate_fn(batch):
@@ -221,8 +250,21 @@ def do_train():
         return tokenized_batch
 
     # Step 4: Create DataLoader with the custom collate_fn
-    train_dataloader = DataLoader(dataset["train"], batch_size=1, collate_fn=collate_fn, shuffle=True)
+    train_dataloader = DataLoader(dataset["train"], batch_size=1, collate_fn=collate_fn, shuffle=True, in_order=False)
     next(iter(train_dataloader))
+    eval_dataloader = DataLoader(dataset["train"], batch_size=1, collate_fn=test_collate_fn, shuffle=True, in_order=False)
+    next(iter(eval_dataloader))
+
+    class EvalDataLoaderProvider:
+        def __init__(self):
+            self.num_val = 0
+            self.train_ = dataset['train']
+            self.max_num = len(self.train_)
+
+        def retrieve(self):
+            next_value = Subset(self.train_, range(self.num_val * 50, (self.num_val * 50) + 50))
+            self.num_val += 1
+            return DataLoader(next_value, batch_size=1, collate_fn=test_collate_fn, shuffle=True, in_order=False)
 
     #############################
     # 3. Load and Modify LLaMA Model
@@ -244,8 +286,11 @@ def do_train():
         if hasattr(layer, "mlp") and hasattr(layer.mlp, "gate_proj"):
             print("Replacing KAN Activation for MLP layer")
         if hasattr(layer, "self_attn"):
-            # next_q_param = torch.nn.Parameter(torch.tensor([1.0]), requires_grad=True)
-            next_q_param = loaded[f'model.layers.{i}.self_attn.softmax.q']
+            name = f'model.layers.{i}.self_attn.softmax.q'
+            if name in loaded.keys():
+                next_q_param = loaded[name]
+            else:
+                next_q_param = torch.nn.Parameter(torch.tensor([1.0]), requires_grad=True)
             q_params.append(next_q_param)
             layer.self_attn = PatchedLlamaAttention(layer.self_attn, next_q_param)
 
@@ -255,14 +300,41 @@ def do_train():
     out_layers.clear()
 
     loaded.clear()
+    loaded = None
+
 
     with open('out_file.txt', 'w') as o:
         pass
     with open('loss_file.txt', 'w') as oo:
         pass
 
+    class OnEval(TrainerCallback):
+
+        def on_evaluate(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
+            with open('eval.txt', 'a') as f:
+                f.write(f"Eval metrics: {state.global_step}, {kwargs['metrics']}")
+            super().on_evaluate(args, state, control, **kwargs)
+
     class MyTrainer(Trainer):
-        def compute_loss(self, model, inputs, num_items_in_batch): # Add return_outputs
+
+        eval_data_loader_provider = EvalDataLoaderProvider()
+
+
+
+        def get_eval_dataloader(self, eval_dataset: Optional[Union[str, Dataset]] = None) -> DataLoader:
+            return self.eval_data_loader_provider.retrieve()
+
+        def compute_loss(self, model, inputs, num_items_in_batch=1, return_outputs=False): # Add return_outputs
+            if not hasattr(self, 'count'):
+                self.count = 0
+
+            self.count += 1
+
+            if self.count >= 555:
+                print("Quitting after count!")
+                sys.exit(0)
+
+
             with open('out_file.txt', 'a') as f:
                 f.write("Performing forward pass")
                 f.write("\n")
@@ -287,6 +359,8 @@ def do_train():
                 loss_file.write("\n")
 
             gc.collect()
+            if return_outputs:
+                return ce_loss, outputs
             return ce_loss
 
     save_steps = 500
@@ -311,14 +385,17 @@ def do_train():
         per_device_train_batch_size=1,
         prediction_loss_only=True,
         # logging_steps=50,
-        evaluation_strategy="no",
+        eval_steps=200,
+        evaluation_strategy="steps",
         remove_unused_columns=False)
 
     trainer = MyTrainer(
         model=model,
+        eval_dataset=dataset['train'],
         train_dataset=dataset["train"],
         data_collator=collate_fn,
-        args=training_args)
+        args=training_args,
+        callbacks=[OnEval()])
 
     trainer.train()
 
