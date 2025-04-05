@@ -1,19 +1,24 @@
 import gc
 import math
+import os.path
 import sys
 import typing
 from typing import Optional, Union
 
 import entmax
+import numpy as np
 import torch
 import torch.nn as nn
 from datasets import load_dataset
+import evaluate
 from torch.utils.data import DataLoader, Dataset, Subset
 from transformers import LlamaForCausalLM, Trainer, TrainingArguments, AutoTokenizer, TrainerCallback, \
     Cache, TrainerState, TrainerControl
 from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
 
 DEVICE = 'mps'
+
+save_steps =30
 
 TOKEN="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"
 
@@ -161,10 +166,12 @@ def do_train():
         for example in batch:
             question_answer = f"<question>{example['question']}</question>"
             question_answer += '\n'
-            question_answer += f"<response>{example['reference_answer']}</response>"
+            question_answer += f"<response>{example['responses'][0]['response']}</response>"
+            question_answer += '\n'
+            question_answer += f"<answer>{example['reference_answer']}</answer>"
             question_answers.append(question_answer)
 
-        tokenized_batch = tokenizer(question_answers, padding=True, truncation=True, return_tensors="pt", max_length=512)
+        tokenized_batch = tokenizer(question_answers, padding=True, truncation=True, return_tensors="pt", max_length=8192)
         print("Returning next tokenized batch.")
         labels = tokenized_batch["input_ids"].clone()  # Clone input_ids
         labels[:, :-1] = tokenized_batch["input_ids"][:, 1:]  # Shift labels one position to the right
@@ -184,7 +191,7 @@ def do_train():
             question_answer += f"<response>{example['responses'][0]['response']}</response>"
             question_answers.append(question_answer)
 
-        tokenized_batch = tokenizer(question_answers, padding=True, truncation=True, return_tensors="pt", max_length=512)
+        tokenized_batch = tokenizer(question_answers, padding=True, truncation=True, return_tensors="pt", max_length=8192)
         print("Returning next tokenized batch.")
         labels = tokenized_batch["input_ids"].clone()  # Clone input_ids
         labels[:, :-1] = tokenized_batch["input_ids"][:, 1:]  # Shift labels one position to the right
@@ -199,6 +206,8 @@ def do_train():
     eval_dataloader = DataLoader(dataset["train"], batch_size=1, collate_fn=test_collate_fn, shuffle=True, in_order=False)
     next(iter(eval_dataloader))
 
+    eval_size = 5
+
     class EvalDataLoaderProvider:
         def __init__(self):
             self.num_val = 0
@@ -206,37 +215,52 @@ def do_train():
             self.max_num = len(self.train_)
 
         def retrieve(self):
-            next_value = Subset(self.train_, range(self.num_val * 50, (self.num_val * 50) + 50))
+            next_value = Subset(self.train_, range((self.num_val * eval_size) + (save_steps + 1), ((self.num_val * eval_size) + eval_size) + (save_steps + 1)))
             self.num_val += 1
             return DataLoader(next_value, batch_size=1, collate_fn=test_collate_fn, shuffle=True, in_order=False)
 
+    start = "/Users/hayde/IdeaProjects/drools/tracing_ml/"
     model = LlamaForCausalLM.from_pretrained(device_map="auto", token=TOKEN, use_cache=False,
-                                             pretrained_model_name_or_path='work/checkpoint-500')
+                                             pretrained_model_name_or_path=f'{start}work/checkpoint-30')
 
     # load the model with the q values
-    loaded = torch.load('work/checkpoint-500/pytorch_model.bin')
+    loaded = torch.load(f'{start}work/checkpoint-30/pytorch_model.bin')
+    def do_save_q():
+        for j, p in enumerate(q_params):
+            torch.save(p, f'model.layers.{j}.self_attn.softmax.q.pt')
+
+    def do_load_q(load_name):
+        return torch.load(load_name)
 
     out_layers = []
     q_params = []
     for i, layer in enumerate(model.model.layers):
-        # Replace the activation in the MLP block:
-        if hasattr(layer, "mlp") and hasattr(layer.mlp, "gate_proj"):
-            print("Replacing KAN Activation for MLP layer")
         if hasattr(layer, "self_attn"):
             name = f'model.layers.{i}.self_attn.softmax.q'
             if name in loaded.keys():
                 next_q_param = loaded[name]
             else:
-                next_q_param = torch.nn.Parameter(torch.tensor([1.0]), requires_grad=True) # TODO: ??? resets q values every other - ok for now, like resetting some weights to 0 and meta-learning to rebuild
+                if os.path.exists(f'{name}.pt'):
+                    next_q_param: torch.nn.Parameter = do_load_q(f'{name}.pt') # TODO: ??? resets q values every other - ok for now, like resetting some weights to 0 and meta-learning to rebuild
+                    next_q_param = next_q_param.requires_grad_(True)
+                else:
+                    next_q_param = torch.nn.Parameter(torch.tensor([1.0]), requires_grad=True)
             q_params.append(next_q_param)
             layer.self_attn = PatchedLlamaAttention(layer.self_attn, next_q_param)
 
         out_layers.append(layer)
 
+    do_save_q()
     model.model.layers = torch.nn.ModuleList([o for o in out_layers])
     out_layers.clear()
 
     loaded = None
+
+    # Setup evaluation
+    bleu = evaluate.load("bleu")
+    rogues = evaluate.load("rouge")
+
+
 
     class OnEval(TrainerCallback):
 
@@ -244,6 +268,8 @@ def do_train():
             with open('eval.txt', 'a') as f:
                 f.write(f"Eval metrics: {state.global_step}, {kwargs['metrics']}\n")
             super().on_evaluate(args, state, control, **kwargs)
+            do_save_q()
+            sys.exit(0)
 
     class MyTrainer(Trainer):
 
@@ -259,7 +285,7 @@ def do_train():
 
             self.count += 1
 
-            if self.count >= 555:
+            if self.count >= 50:
                 print("Quitting after count!")
                 sys.exit(0)
 
@@ -270,13 +296,7 @@ def do_train():
 
             outputs = model(**inputs)
 
-            token_ids = torch.argmax(outputs.logits, dim=-1)  # Get highest-probability token for each position
-            decoded = tokenizer.batch_decode(token_ids, skip_special_tokens=True)
-
-            with open('out_file.txt', 'a') as f:
-                f.write(f"Finished forward pass with outputs {str(outputs)}\n")
-                f.write(f'{str(decoded)}\n')
-                f.write("\n")
+            self.write_metrics(inputs, outputs)
 
             ce_loss = outputs.loss  # Standard cross-entropy loss
 
@@ -292,18 +312,32 @@ def do_train():
                 return ce_loss, outputs
             return ce_loss
 
-    save_steps = 500
+        def write_metrics(self, inputs, outputs):
+            token_ids = torch.argmax(outputs.logits, dim=-1)
+            decoded = tokenizer.batch_decode(token_ids, skip_special_tokens=True)
+            target = tokenizer.batch_decode(inputs.input_ids, skip_special_tokens=True)
+            with open('bleu-metrics.txt', 'a') as f:
+                b = bleu.compute(predictions=decoded, references=target)
+                f.write(f"{b}\n")
+            with open('rouge-metrics.txt', 'a') as f:
+                r = rogues.compute(predictions=decoded, references=target)
+                f.write(f"{r}\n")
+            with open('out_file.txt', 'a') as f:
+                f.write(f"Finished forward pass with outputs {str(outputs)}\n")
+                f.write(f'{str(decoded)}\n')
+                f.write("\n")
+
     save_strategy = "steps"
     logging_strategy ="no"
 
     model.gradient_checkpointing_enable()
 
-    out_dir = 'work'
+    out_dir = f'{start}work'
 
     training_args = TrainingArguments(
-        resume_from_checkpoint='work/checkpoint-500',
+        resume_from_checkpoint=f'{start}work/checkpoint-30',
         save_safetensors=False,
-        learning_rate=4e-5,
+        learning_rate=5e-5,
         save_strategy=save_strategy,
         logging_strategy=logging_strategy,
         save_steps=save_steps,
@@ -314,7 +348,7 @@ def do_train():
         per_device_train_batch_size=1,
         prediction_loss_only=True,
         # logging_steps=50,
-        eval_steps=200,
+        eval_steps=31,
         evaluation_strategy="steps",
         remove_unused_columns=False)
 
